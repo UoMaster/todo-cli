@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { render, Text, Box, useInput, useApp, useStdout, useStdin, Static } from 'ink';
 import TextInput from 'ink-text-input';
 import { loadCache, saveCache, getProjectInfo, type Todo } from './cache.js';
-import { parseDueDate, formatTime, isOverdue, isDueSoon } from './utils.js';
+import { parseDueDate, formatTime, isOverdue, isDueSoon, extractTags, extractPriority, removeTags, getAllTags, matchesSearch } from './utils.js';
 
 interface DeletedTodo {
   todo: Todo;
@@ -48,6 +48,22 @@ const TodoList = () => {
   const [isDueInputMode, setIsDueInputMode] = useState(false);
   const [pendingTodoText, setPendingTodoText] = useState('');
   const [message, setMessage] = useState('');
+
+  // 搜索功能
+  const [isSearchMode, setIsSearchMode] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+
+  // 编辑功能
+  const [isEditMode, setIsEditMode] = useState(false);
+  const [isEditDueMode, setIsEditDueMode] = useState(false);
+  const [editValue, setEditValue] = useState('');
+  const [editDueValue, setEditDueValue] = useState('');
+  const [editingTodoId, setEditingTodoId] = useState<number | null>(null);
+
+  // 标签过滤
+  const [tagFilter, setTagFilter] = useState<string | null>(null);
+  const [showTagSelector, setShowTagSelector] = useState(false);
+  const [tagSelectorIndex, setTagSelectorIndex] = useState(0);
 
   // 项目信息（工作目录和分支）
   const [projectInfo, setProjectInfo] = useState<{ dir: string; branch: string } | null>(null);
@@ -103,7 +119,134 @@ const TodoList = () => {
     setTimeout(() => setMessage(''), 2000);
   };
 
+  // 过滤后的任务列表
+  const filteredTodos = useMemo(() => {
+    let result = [...todos];
+    
+    // 应用搜索过滤
+    if (searchQuery) {
+      result = result.filter(todo => matchesSearch(todo, searchQuery));
+    }
+    
+    // 应用标签过滤
+    if (tagFilter) {
+      result = result.filter(todo => {
+        const tags = extractTags(todo.text);
+        return tags.includes(tagFilter.toLowerCase());
+      });
+    }
+    
+    return result;
+  }, [todos, searchQuery, tagFilter]);
+
+  // 保存任务时提取标签和优先级
+  const processNewTodo = (text: string, dueAt?: string): Todo => {
+    const { priority } = extractPriority(text);
+    const tags = extractTags(text);
+    
+    return {
+      id: Date.now(),
+      text,
+      completed: false,
+      createdAt: new Date().toISOString(),
+      dueAt,
+      tags,
+      priority,
+    };
+  };
+
   useInput((input, key) => {
+    // 标签选择器模式
+    if (showTagSelector) {
+      const allTags = getAllTags(todos);
+      if (key.escape) {
+        setShowTagSelector(false);
+        setTagSelectorIndex(0);
+      } else if (key.upArrow || input === 'k') {
+        setTagSelectorIndex(Math.max(0, tagSelectorIndex - 1));
+      } else if (key.downArrow || input === 'j') {
+        setTagSelectorIndex(Math.min(allTags.length - 1, tagSelectorIndex + 1));
+      } else if (key.return) {
+        if (allTags[tagSelectorIndex]) {
+          setTagFilter(allTags[tagSelectorIndex]);
+          setSelectedIndex(0);
+          showMessage(`按标签过滤: #${allTags[tagSelectorIndex]}`);
+        }
+        setShowTagSelector(false);
+        setTagSelectorIndex(0);
+      } else if (input === 'c') {
+        setTagFilter(null);
+        setShowTagSelector(false);
+        setTagSelectorIndex(0);
+        showMessage('已清除标签过滤');
+      }
+      return;
+    }
+
+    // 编辑截止时间模式
+    if (isEditDueMode) {
+      if (key.escape) {
+        setIsEditDueMode(false);
+        setEditDueValue('');
+        setEditingTodoId(null);
+        showMessage('取消编辑');
+      } else if (key.return) {
+        const dueAt = parseDueDate(editDueValue);
+        setTodos(todos.map(t => 
+          t.id === editingTodoId 
+            ? { ...t, dueAt }
+            : t
+        ));
+        setIsEditDueMode(false);
+        setEditDueValue('');
+        setEditingTodoId(null);
+        const dueMsg = dueAt ? ` (${formatTime(dueAt)})` : '';
+        showMessage(`任务已更新${dueMsg}`);
+      }
+      return;
+    }
+
+    // 编辑模式
+    if (isEditMode) {
+      if (key.escape) {
+        setIsEditMode(false);
+        setEditValue('');
+        setEditingTodoId(null);
+        showMessage('取消编辑');
+      } else if (key.return) {
+        if (editValue.trim()) {
+          const { priority } = extractPriority(editValue.trim());
+          const tags = extractTags(editValue.trim());
+          setTodos(todos.map(t => 
+            t.id === editingTodoId 
+              ? { ...t, text: editValue.trim(), priority, tags }
+              : t
+          ));
+          setEditValue('');
+          setEditingTodoId(null);
+          setIsEditMode(false);
+          showMessage('任务已更新');
+        }
+      }
+      return;
+    }
+
+    // 搜索模式
+    if (isSearchMode) {
+      if (key.escape) {
+        setIsSearchMode(false);
+        setSearchQuery('');
+        setSelectedIndex(0);
+        showMessage('退出搜索');
+      } else if (key.return) {
+        setIsSearchMode(false);
+        if (searchQuery) {
+          showMessage(`搜索: ${searchQuery}`);
+        }
+      }
+      return;
+    }
+
     // 截止时间输入模式
     if (isDueInputMode) {
       if (key.escape) {
@@ -113,18 +256,12 @@ const TodoList = () => {
         showMessage('取消添加');
       } else if (key.return) {
         const dueAt = parseDueDate(dueInputValue);
-        const newTodo: Todo = {
-          id: Date.now(),
-          text: pendingTodoText,
-          completed: false,
-          createdAt: new Date().toISOString(),
-          dueAt,
-        };
+        const newTodo = processNewTodo(pendingTodoText, dueAt);
         setTodos([...todos, newTodo]);
         setDueInputValue('');
         setPendingTodoText('');
         setIsDueInputMode(false);
-        setSelectedIndex(todos.length);
+        setSelectedIndex(filteredTodos.length);
         const dueMsg = dueAt ? ` (${formatTime(dueAt)})` : '';
         showMessage(`任务已添加${dueMsg}`);
       }
@@ -158,16 +295,67 @@ const TodoList = () => {
       return;
     }
 
+    // 搜索功能 (/)
+    if (input === '/') {
+      setIsSearchMode(true);
+      setSearchQuery('');
+      return;
+    }
+
+    // 标签选择器 (t)
+    if (input === 't') {
+      const allTags = getAllTags(todos);
+      if (allTags.length > 0) {
+        setShowTagSelector(true);
+        setTagSelectorIndex(0);
+      } else {
+        showMessage('没有可用的标签');
+      }
+      return;
+    }
+
+    // 清除过滤 (c)
+    if (input === 'c') {
+      if (tagFilter || searchQuery) {
+        setTagFilter(null);
+        setSearchQuery('');
+        setSelectedIndex(0);
+        showMessage('已清除所有过滤');
+      }
+      return;
+    }
+
+    // 编辑任务 (e)
+    if (input === 'e') {
+      const currentTodo = filteredTodos[selectedIndex];
+      if (currentTodo) {
+        setEditingTodoId(currentTodo.id);
+        setEditValue(currentTodo.text);
+        setIsEditMode(true);
+      }
+      return;
+    }
+
+    // 编辑截止时间 (E)
+    if (input === 'E') {
+      const currentTodo = filteredTodos[selectedIndex];
+      if (currentTodo) {
+        setEditingTodoId(currentTodo.id);
+        setEditDueValue(currentTodo.dueAt ? formatTime(currentTodo.dueAt) : '');
+        setIsEditDueMode(true);
+      }
+      return;
+    }
+
     // 删除任务 (d) - 可撤回
     if (input === 'd') {
-      const todo = todos[selectedIndex];
+      const todo = filteredTodos[selectedIndex];
       if (todo) {
-        // 保存到删除栈
-        setDeletedStack(prev => [...prev, { todo, index: selectedIndex }]);
-        // 删除任务
+        const originalIndex = todos.findIndex(t => t.id === todo.id);
+        setDeletedStack(prev => [...prev, { todo, index: originalIndex }]);
         setTodos(todos.filter(t => t.id !== todo.id));
-        if (selectedIndex >= todos.length - 1) {
-          setSelectedIndex(Math.max(0, todos.length - 2));
+        if (selectedIndex >= filteredTodos.length - 1) {
+          setSelectedIndex(Math.max(0, filteredTodos.length - 2));
         }
         showMessage(`已删除: ${todo.text} (按 u 撤回)`);
       }
@@ -178,13 +366,14 @@ const TodoList = () => {
     if (input === 'u') {
       if (deletedStack.length > 0) {
         const lastDeleted = deletedStack[deletedStack.length - 1];
-        // 恢复任务到原来的位置
-        const newTodos = [...todos];
-        newTodos.splice(lastDeleted.index, 0, lastDeleted.todo);
-        setTodos(newTodos);
-        setDeletedStack(prev => prev.slice(0, -1));
-        setSelectedIndex(lastDeleted.index);
-        showMessage(`已撤回: ${lastDeleted.todo.text}`);
+        if (lastDeleted) {
+          const newTodos = [...todos];
+          newTodos.splice(lastDeleted.index, 0, lastDeleted.todo);
+          setTodos(newTodos);
+          setDeletedStack(prev => prev.slice(0, -1));
+          setSelectedIndex(Math.min(lastDeleted.index, filteredTodos.length - 1));
+          showMessage(`已撤回: ${lastDeleted.todo.text}`);
+        }
       } else {
         showMessage('没有可撤回的操作');
       }
@@ -192,11 +381,14 @@ const TodoList = () => {
     }
 
     if (input === ' ') {
-      const newTodos = [...todos];
-      if (newTodos[selectedIndex]) {
-        newTodos[selectedIndex].completed = !newTodos[selectedIndex].completed;
-        setTodos(newTodos);
-        const status = newTodos[selectedIndex].completed ? '完成' : '未完成';
+      const currentTodo = filteredTodos[selectedIndex];
+      if (currentTodo) {
+        setTodos(todos.map(t => 
+          t.id === currentTodo.id 
+            ? { ...t, completed: !t.completed }
+            : t
+        ));
+        const status = !currentTodo.completed ? '完成' : '未完成';
         showMessage(`标记为 ${status}`);
       }
       return;
@@ -209,7 +401,7 @@ const TodoList = () => {
     }
 
     if (key.downArrow || input === 'j') {
-      setSelectedIndex(Math.min(todos.length - 1, selectedIndex + 1));
+      setSelectedIndex(Math.min(filteredTodos.length - 1, selectedIndex + 1));
       return;
     }
 
@@ -221,13 +413,16 @@ const TodoList = () => {
 
     // vim 风格: l 向下滚动（可选，这里用于跳转到最后一项）
     if (input === 'l') {
-      setSelectedIndex(Math.max(0, todos.length - 1));
+      setSelectedIndex(Math.max(0, filteredTodos.length - 1));
       return;
     }
   });
 
   const completedCount = todos.filter(t => t.completed).length;
   const pendingCount = todos.length - completedCount;
+  const overdueCount = todos.filter(t => !t.completed && t.dueAt && isOverdue(t.dueAt)).length;
+  const filteredCompletedCount = filteredTodos.filter(t => t.completed).length;
+  const filteredPendingCount = filteredTodos.length - filteredCompletedCount;
 
   // 判断是否小窗口 (< 80 列或 < 20 行)
   const isSmallScreen = dimensions.width < 80 || dimensions.height < 20;
@@ -262,27 +457,59 @@ const TodoList = () => {
             {/* 简洁标题栏 */}
             <Box flexDirection="row" marginBottom={1}>
               <Text bold color="cyan">Tasks</Text>
-              <Text color="gray"> ({todos.length}) </Text>
+              <Text color="gray"> ({filteredTodos.length}/{todos.length}) </Text>
               <Text color="gray">-</Text>
-              <Text color="green"> {completedCount} done</Text>
-              {projectInfo && projectInfo.branch !== 'nogit' && (
+              <Text color="green"> {filteredCompletedCount} done</Text>
+              {tagFilter && (
                 <>
                   <Text color="gray"> | </Text>
-                  <Text color="yellow">{projectInfo.branch}</Text>
+                  <Text color="magenta">#{tagFilter}</Text>
+                </>
+              )}
+              {searchQuery && (
+                <>
+                  <Text color="gray"> | </Text>
+                  <Text color="yellow">/{searchQuery}</Text>
                 </>
               )}
             </Box>
 
+            {/* 标签选择器 */}
+            {showTagSelector && (
+              <Box 
+                flexDirection="column" 
+                borderStyle="single" 
+                borderColor="cyan" 
+                padding={1}
+                marginBottom={1}
+              >
+                <Text bold color="cyan">选择标签过滤:</Text>
+                {getAllTags(todos).map((tag, idx) => (
+                  <Box key={tag}>
+                    <Text color={idx === tagSelectorIndex ? 'cyan' : 'white'}>
+                      {idx === tagSelectorIndex ? '> ' : '  '}
+                      #{tag}
+                    </Text>
+                  </Box>
+                ))}
+                <Text dimColor>按 Enter 选择, c 清除过滤, Esc 取消</Text>
+              </Box>
+            )}
+
             <Box flexDirection="column">
-              {todos.length === 0 ? (
-                <Text dimColor>Press 'a' to add task</Text>
+              {filteredTodos.length === 0 ? (
+                <Text dimColor>
+                  {todos.length === 0 ? "Press 'a' to add task" : "没有匹配的任务"}
+                </Text>
               ) : (
-                todos.map((todo, index) => {
-                  const isSelected = index === selectedIndex && !isInputMode;
-                  const displayText = truncateText(todo.text, dimensions.width - 18);
+                filteredTodos.map((todo, index) => {
+                  const isSelected = index === selectedIndex && !isInputMode && !isEditMode;
+                  const displayText = truncateText(removeTags(todo.text), dimensions.width - 20);
                   const hasDue = !!todo.dueAt;
                   const overdue = hasDue && isOverdue(todo.dueAt!);
                   const dueSoon = hasDue && isDueSoon(todo.dueAt!);
+                  const tags = extractTags(todo.text);
+                  const priorityColor = todo.priority === 'high' ? 'red' : todo.priority === 'medium' ? 'yellow' : 'gray';
 
                   return (
                     <Box key={todo.id}>
@@ -293,15 +520,23 @@ const TodoList = () => {
                         <Text color={todo.completed ? 'green' : 'white'}>
                           {todo.completed ? '[x] ' : '[ ] '}
                         </Text>
+                        {todo.priority && (
+                          <Text color={priorityColor}>{todo.priority === 'high' ? '!' : todo.priority === 'medium' ? '‼' : '·'} </Text>
+                        )}
                         <Text
                           strikethrough={todo.completed}
                           color={todo.completed ? 'gray' : 'white'}
                         >
                           {displayText}
                         </Text>
+                        {tags.length > 0 && (
+                          <Text color="cyan">
+                            {' '}{tags.map(t => `#${t}`).join(' ')}
+                          </Text>
+                        )}
                         {hasDue && !todo.completed && (
                           <Text color={overdue ? 'red' : dueSoon ? 'yellow' : 'gray'}>
-                            {' '}{formatTime(todo.dueAt!)}{overdue ? ' !' : ''}
+                            {' '}[{formatTime(todo.dueAt!)}]
                           </Text>
                         )}
                       </Box>
@@ -310,6 +545,82 @@ const TodoList = () => {
                 })
               )}
             </Box>
+
+            {/* 搜索输入框 */}
+            {isSearchMode && (
+              <Box marginTop={1} borderStyle="single" borderColor="yellow" paddingX={1}>
+                <Text color="yellow">/ </Text>
+                <TextInput
+                  value={searchQuery}
+                  onChange={setSearchQuery}
+                  onSubmit={() => {
+                    setIsSearchMode(false);
+                    if (searchQuery) {
+                      showMessage(`搜索: ${searchQuery}`);
+                    }
+                  }}
+                  placeholder="搜索任务或标签..."
+                  showCursor={true}
+                />
+              </Box>
+            )}
+
+            {/* 编辑输入框 */}
+            {isEditMode && (
+              <Box marginTop={1} borderStyle="single" borderColor="green" paddingX={1}>
+                <Text color="green">Edit: </Text>
+                <TextInput
+                  value={editValue}
+                  onChange={setEditValue}
+                  onSubmit={(value) => {
+                    if (value.trim()) {
+                      const { priority } = extractPriority(value.trim());
+                      const tags = extractTags(value.trim());
+                      setTodos(todos.map(t => 
+                        t.id === editingTodoId 
+                          ? { ...t, text: value.trim(), priority, tags }
+                          : t
+                      ));
+                      setEditValue('');
+                      setEditingTodoId(null);
+                      setIsEditMode(false);
+                      showMessage('任务已更新');
+                    }
+                  }}
+                  placeholder="编辑任务..."
+                  showCursor={true}
+                />
+              </Box>
+            )}
+
+            {/* 编辑截止时间输入框 */}
+            {isEditDueMode && (
+              <Box marginTop={1} flexDirection="column" borderStyle="single" borderColor="magenta" paddingX={1}>
+                <Box>
+                  <Text color="magenta">Edit Due: </Text>
+                  <TextInput
+                    value={editDueValue}
+                    onChange={setEditDueValue}
+                    onSubmit={(value) => {
+                      const dueAt = parseDueDate(value);
+                      setTodos(todos.map(t => 
+                        t.id === editingTodoId 
+                          ? { ...t, dueAt }
+                          : t
+                      ));
+                      setIsEditDueMode(false);
+                      setEditDueValue('');
+                      setEditingTodoId(null);
+                      const dueMsg = dueAt ? ` (${formatTime(dueAt)})` : '';
+                      showMessage(`截止时间已更新${dueMsg}`);
+                    }}
+                    placeholder="30m/2h/3d/1w/tmr"
+                    showCursor={true}
+                  />
+                </Box>
+                <Text dimColor>格式: 30m, 2h, 3d, 1w, tmr, mon-fri, MM-DD</Text>
+              </Box>
+            )}
 
             {isInputMode && (
               <Box marginTop={1}>
@@ -340,18 +651,12 @@ const TodoList = () => {
                     onChange={setDueInputValue}
                     onSubmit={(value) => {
                       const dueAt = parseDueDate(value);
-                      const newTodo: Todo = {
-                        id: Date.now(),
-                        text: pendingTodoText,
-                        completed: false,
-                        createdAt: new Date().toISOString(),
-                        dueAt,
-                      };
+                      const newTodo = processNewTodo(pendingTodoText, dueAt);
                       setTodos([...todos, newTodo]);
                       setDueInputValue('');
                       setPendingTodoText('');
                       setIsDueInputMode(false);
-                      setSelectedIndex(todos.length);
+                      setSelectedIndex(filteredTodos.length);
                       const dueMsg = dueAt ? ` (${formatTime(dueAt)})` : '';
                       showMessage(`任务已添加${dueMsg}`);
                     }}
@@ -372,10 +677,18 @@ const TodoList = () => {
           >
             {isDueInputMode ? (
               <Text>Enter:save Esc:cancel | 30m 2h 3d 1w tmr mon-fri</Text>
+            ) : isEditDueMode ? (
+              <Text>Enter:save Esc:cancel | 30m 2h 3d 1w tmr</Text>
+            ) : isSearchMode ? (
+              <Text>Enter:search Esc:cancel</Text>
+            ) : isEditMode ? (
+              <Text>Enter:save Esc:cancel | !high !medium !low #tag</Text>
             ) : isInputMode ? (
               <Text>Enter:next Esc:cancel</Text>
+            ) : showTagSelector ? (
+              <Text>Enter:select jk:move c:clear Esc:cancel</Text>
             ) : (
-              <Text>jk:move space:toggle a:add d:del u:undo q:quit</Text>
+              <Text>jk:move /:search t:tag e:edit space:toggle a:add d:del q:quit</Text>
             )}
           </Box>
         </Box>
@@ -391,21 +704,59 @@ const TodoList = () => {
             padding={1}
             overflow="hidden"
           >
-            <Text bold underline color="cyan">
-              任务列表 ({todos.length})
-            </Text>
+            <Box flexDirection="row" justifyContent="space-between">
+              <Text bold underline color="cyan">
+                任务列表 ({filteredTodos.length}/{todos.length})
+              </Text>
+              {(tagFilter || searchQuery) && (
+                <Box>
+                  {tagFilter && (
+                    <Text color="magenta">#{tagFilter} </Text>
+                  )}
+                  {searchQuery && (
+                    <Text color="yellow">/{searchQuery}</Text>
+                  )}
+                </Box>
+              )}
+            </Box>
+
+            {/* 标签选择器 */}
+            {showTagSelector && (
+              <Box 
+                flexDirection="column" 
+                borderStyle="single" 
+                borderColor="cyan" 
+                padding={1}
+                marginTop={1}
+              >
+                <Text bold color="cyan">选择标签过滤:</Text>
+                {getAllTags(todos).map((tag, idx) => (
+                  <Box key={tag}>
+                    <Text color={idx === tagSelectorIndex ? 'cyan' : 'white'} bold={idx === tagSelectorIndex}>
+                      {idx === tagSelectorIndex ? '▸ ' : '  '}
+                      #{tag}
+                    </Text>
+                  </Box>
+                ))}
+                <Box marginTop={1}><Text dimColor>按 Enter 选择, c 清除过滤, Esc 取消</Text></Box>
+              </Box>
+            )}
 
             <Box flexDirection="column" marginTop={1}>
-              {todos.length === 0 ? (
-                <Text dimColor>暂无任务，按 'a' 添加新任务</Text>
+              {filteredTodos.length === 0 ? (
+                <Text dimColor>
+                  {todos.length === 0 ? "暂无任务，按 'a' 添加新任务" : "没有匹配的任务"}
+                </Text>
               ) : (
-                todos.map((todo, index) => {
-                  const isSelected = index === selectedIndex && !isInputMode && !isDueInputMode;
-                  const maxTextWidth = Math.floor(dimensions.width * 0.5) - 15;
-                  const displayText = truncateText(todo.text, maxTextWidth);
+                filteredTodos.map((todo, index) => {
+                  const isSelected = index === selectedIndex && !isInputMode && !isDueInputMode && !isEditMode && !isEditDueMode && !showTagSelector;
+                  const maxTextWidth = Math.floor(dimensions.width * 0.5) - 20;
+                  const displayText = truncateText(removeTags(todo.text), maxTextWidth);
                   const hasDue = !!todo.dueAt;
                   const overdue = hasDue && isOverdue(todo.dueAt!);
                   const dueSoon = hasDue && isDueSoon(todo.dueAt!);
+                  const tags = extractTags(todo.text);
+                  const priorityColor = todo.priority === 'high' ? 'red' : todo.priority === 'medium' ? 'yellow' : 'gray';
 
                   return (
                     <Box key={todo.id}>
@@ -417,6 +768,12 @@ const TodoList = () => {
                           {todo.completed ? '✓' : '○'}
                         </Text>
                         <Text> </Text>
+                        {todo.priority && (
+                          <Text color={priorityColor}>
+                            {todo.priority === 'high' ? '!' : todo.priority === 'medium' ? '‼' : '·'}
+                          </Text>
+                        )}
+                        <Text> </Text>
                         <Text
                           strikethrough={todo.completed}
                           color={todo.completed ? 'gray' : isSelected ? 'cyan' : 'white'}
@@ -425,6 +782,11 @@ const TodoList = () => {
                         >
                           {displayText}
                         </Text>
+                        {tags.length > 0 && (
+                          <Text color="cyan">
+                            {' '}{tags.map(t => `#${t}`).join(' ')}
+                          </Text>
+                        )}
                         {todo.completed && (
                           <Text color="green" dimColor>
                             {' '}[已完成]
@@ -432,7 +794,7 @@ const TodoList = () => {
                         )}
                         {hasDue && !todo.completed && (
                           <Text color={overdue ? 'red' : dueSoon ? 'yellow' : 'gray'}>
-                            {' '}[{formatTime(todo.dueAt!)}{overdue ? ' ⚠' : ''}]
+                            {' '}[{formatTime(todo.dueAt!)}]
                           </Text>
                         )}
                       </Box>
@@ -441,6 +803,81 @@ const TodoList = () => {
                 })
               )}
             </Box>
+
+            {/* 搜索输入框 */}
+            {isSearchMode && (
+              <Box marginTop={1} borderStyle="single" borderColor="yellow" paddingX={1}>
+                <Text color="yellow">搜索: </Text>
+                <TextInput
+                  value={searchQuery}
+                  onChange={setSearchQuery}
+                  onSubmit={() => {
+                    setIsSearchMode(false);
+                    if (searchQuery) {
+                      showMessage(`搜索: ${searchQuery}`);
+                    }
+                  }}
+                  placeholder="搜索任务或标签..."
+                  showCursor={true}
+                />
+              </Box>
+            )}
+
+            {/* 编辑输入框 */}
+            {isEditMode && (
+              <Box marginTop={1} borderStyle="single" borderColor="green" paddingX={1}>
+                <Text color="green">编辑任务: </Text>
+                <TextInput
+                  value={editValue}
+                  onChange={setEditValue}
+                  onSubmit={(value) => {
+                    if (value.trim()) {
+                      const { priority } = extractPriority(value.trim());
+                      const tags = extractTags(value.trim());
+                      setTodos(todos.map(t => 
+                        t.id === editingTodoId 
+                          ? { ...t, text: value.trim(), priority, tags }
+                          : t
+                      ));
+                      setEditValue('');
+                      setEditingTodoId(null);
+                      setIsEditMode(false);
+                      showMessage('任务已更新');
+                    }
+                  }}
+                  placeholder="编辑任务内容..."
+                  showCursor={true}
+                />
+              </Box>
+            )}
+
+            {/* 编辑截止时间输入框 */}
+            {isEditDueMode && (
+              <Box marginTop={1} borderStyle="single" borderColor="magenta" paddingX={1} flexDirection="column">
+                <Box>
+                  <Text color="magenta">编辑截止时间: </Text>
+                  <TextInput
+                    value={editDueValue}
+                    onChange={setEditDueValue}
+                    onSubmit={(value) => {
+                      const dueAt = parseDueDate(value);
+                      setTodos(todos.map(t => 
+                        t.id === editingTodoId 
+                          ? { ...t, dueAt }
+                          : t
+                      ));
+                      setIsEditDueMode(false);
+                      setEditDueValue('');
+                      setEditingTodoId(null);
+                      const dueMsg = dueAt ? ` (${formatTime(dueAt)})` : '';
+                      showMessage(`截止时间已更新${dueMsg}`);
+                    }}
+                    placeholder="30m/2h/3d/1w/tmr/mon/03-20 (留空=清除)"
+                    showCursor={true}
+                  />
+                </Box>
+              </Box>
+            )}
 
             {isInputMode && (
               <Box marginTop={1} borderStyle="single" borderColor="yellow" paddingX={1}>
@@ -470,18 +907,12 @@ const TodoList = () => {
                     onChange={setDueInputValue}
                     onSubmit={(value) => {
                       const dueAt = parseDueDate(value);
-                      const newTodo: Todo = {
-                        id: Date.now(),
-                        text: pendingTodoText,
-                        completed: false,
-                        createdAt: new Date().toISOString(),
-                        dueAt,
-                      };
+                      const newTodo = processNewTodo(pendingTodoText, dueAt);
                       setTodos([...todos, newTodo]);
                       setDueInputValue('');
                       setPendingTodoText('');
                       setIsDueInputMode(false);
-                      setSelectedIndex(todos.length);
+                      setSelectedIndex(filteredTodos.length);
                       const dueMsg = dueAt ? ` (${formatTime(dueAt)})` : '';
                       showMessage(`任务已添加${dueMsg}`);
                     }}
@@ -519,7 +950,38 @@ const TodoList = () => {
                 <Text color="red">待处理: </Text>
                 <Text bold color="red">{pendingCount}</Text>
               </Box>
+              <Box>
+                <Text color="red">已超时: </Text>
+                <Text bold color="red">{overdueCount}</Text>
+              </Box>
+              <Box>
+                <Text color="cyan">标签数: </Text>
+                <Text bold color="cyan">{getAllTags(todos).length}</Text>
+              </Box>
             </Box>
+
+            {/* 标签列表 */}
+            {getAllTags(todos).length > 0 && (
+              <>
+                <Box marginTop={2}>
+                  <Text bold underline color="cyan">
+                    标签
+                  </Text>
+                </Box>
+                <Box flexDirection="column" marginTop={1}>
+                  {getAllTags(todos).slice(0, 8).map(tag => (
+                    <Box key={tag}>
+                      <Text color={tagFilter === tag ? 'magenta' : 'cyan'}>
+                        {tagFilter === tag ? '▸ ' : '  '}#{tag}
+                      </Text>
+                    </Box>
+                  ))}
+                  {getAllTags(todos).length > 8 && (
+                    <Text dimColor>... 还有 {getAllTags(todos).length - 8} 个</Text>
+                  )}
+                </Box>
+              </>
+            )}
 
             <Box marginTop={2}>
               <Text bold underline color="cyan">
@@ -553,6 +1015,9 @@ const TodoList = () => {
               <Text dimColor>h 顶部 l 底部</Text>
               <Text dimColor>空格 完成</Text>
               <Text dimColor>a 添加 d 删除</Text>
+              <Text dimColor>e 编辑 E 改时间</Text>
+              <Text dimColor>/ 搜索 t 标签</Text>
+              <Text dimColor>c 清除过滤</Text>
               <Text dimColor>u 撤回</Text>
               <Text dimColor>q/Esc 退出</Text>
             </Box>
@@ -561,6 +1026,17 @@ const TodoList = () => {
       )}
 
 
+
+      {/* 消息提示 */}
+      {message && (
+        <Box 
+          height={1} 
+          paddingLeft={1}
+          backgroundColor="yellow"
+        >
+          <Text color="black" bold>{message}</Text>
+        </Box>
+      )}
 
       {/* IME 拼音预览预留区域 - 防止输入法导致界面跳动 */}
       <Box height={2} />

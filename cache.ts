@@ -11,6 +11,8 @@ export interface Todo {
   completed: boolean;
   createdAt: string;      // ISO 格式创建时间
   dueAt?: string;         // 可选的截止时间
+  tags?: string[];        // 从文本中提取的标签
+  priority?: 'high' | 'medium' | 'low';  // 优先级
 }
 
 export interface CacheData {
